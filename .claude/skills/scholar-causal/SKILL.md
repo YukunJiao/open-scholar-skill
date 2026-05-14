@@ -1,8 +1,8 @@
 ---
 name: scholar-causal
 description: Comprehensive causal inference toolkit for social science research. Covers DAG construction, method selection, and thirteen identification strategies (OLS, DiD, RD, IV, FE, matching/reweighting, synthetic control, causal mediation, staggered DiD, DML/causal forests, bunching estimation, shift-share/Bartik instruments, distributional/quantile methods) — each with assumptions, diagnostics, R code, Stata code, and a write-up template. Use when the user needs to select and justify a causal identification strategy, build a causal DAG, or write the identification argument in their Methods section. Works between /scholar-hypothesis and /scholar-design.
-tools: Read, WebSearch
-argument-hint: "[research question] [key variables: X, Y, possible confounders/mediators] [data structure: panel/cross-section/natural experiment]"
+tools: Read, WebSearch, Bash, Write, Grep, Glob
+argument-hint: "[research question] [key variables: X, Y, possible confounders/mediators] [data structure: panel/cross-section/natural experiment] [optional: data path for pre-design diagnostics]"
 user-invocable: true
 ---
 
@@ -273,6 +273,8 @@ cat "$SKILL_DIR/strategies.md"
 
 This file contains all 13 strategies: OLS, DiD, RD, IV, FE, Matching/Reweighting, Synthetic Control, Causal Mediation, Staggered DiD, DML/Causal Forests, Bunching, Bartik IV, Distributional/Quantile Methods.
 
+For **staggered DiD specifically**, a fully runnable Callaway-Sant'Anna (2021) workflow template — covering simulated and real-data examples, all four aggregation types (`simple`, `dynamic`, `group`, `calendar`), `balance_e` balanced event studies, alternative control groups, anticipation testing, and the `conditional_did_pretest` diagnostic — is bundled as [`references/did-cs-workflow.R`](references/did-cs-workflow.R). It is derived verbatim from the package's own vignettes ([did-basics](https://bcallaway11.github.io/did/articles/did-basics.html), [multi-period-did](https://bcallaway11.github.io/did/articles/multi-period-did.html), [pre-testing](https://bcallaway11.github.io/did/articles/pre-testing.html)) and passes `Rscript --parse`.
+
 After loading and executing the relevant strategy, continue with PART 4 (Sensitivity Analysis) below.
 
 ---
@@ -450,6 +452,42 @@ m_spill <- feols(y ~ treatment + neighbor_treated + controls | id + year,
 
 ---
 
+### Specification Curve / Multiverse Sensitivity
+
+**What it measures**: How much the headline result depends on defensible-but-arbitrary analytic choices — sample restrictions, covariate sets, outcome operationalizations, estimator family. Diagnoses Simpson-style sign reversals across alternative defensible specifications, which a single "preferred specification" can hide.
+
+**When to use**: Any observational analysis with non-trivial analytic decisions. Reviewers at top sociology, political science, public health, and psychology journals increasingly request a spec-curve or multiverse appendix when the analytic decision tree is wide.
+
+**Multiverse Analysis (Steegen, Tuerlinckx, Gelman, & Vanpaemel 2016)**: Enumerate every defensible *data-construction* choice (missing-data handling, outlier rules, scale construction, sample restrictions), run the full analysis under every combination, and report the *distribution* of estimates and p-values rather than a single point.
+
+**Specification Curve Analysis (Simonsohn, Simmons, & Nelson 2020)**: Enumerate defensible *analytic specifications* (controls, fixed effects, estimator family). Display estimates sorted by magnitude with significance markers; conduct joint inference across the curve via permutation under the sharp null.
+
+**R** (`specr`):
+
+```r
+# install.packages("specr")
+library(specr)
+specs <- setup(
+  data     = df,
+  y        = c("y_main", "y_log", "y_winsor"),
+  x        = "treat",
+  model    = c("lm", "feols"),
+  controls = c("age", "female", "education"),
+  subsets  = list(region = unique(df$region))
+)
+results <- specr(specs)
+plot_specs(results, choices = c("y", "controls", "subsets"))
+summary(results, type = "curve")
+```
+
+**Reporting template**:
+
+> "To assess robustness to analytic choices, we conduct a specification curve analysis following Simonsohn, Simmons, and Nelson (2020). We define the universe of defensible specifications by crossing [N₁ outcome operationalizations] × [N₂ control sets] × [N₃ estimator families] × [N₄ sample restrictions], yielding [N] specifications. Across the curve, the median estimate is [X] and [Y]% of specifications are statistically significant at p < .05. Joint inference under the sharp null rejects at p = [Z]. The result is therefore not driven by an idiosyncratic specification choice."
+
+**Pairs well with**: any sensitivity check above. A spec curve is a meta-sensitivity tool — it asks whether the *choice of sensitivity check* itself matters.
+
+---
+
 ## PART 5: WRITING THE IDENTIFICATION ARGUMENT
 
 ### Canonical Identification Section Structure
@@ -503,6 +541,135 @@ When using complementary strategies (e.g., PSM + OLS, FE + DiD, IV + OLS compari
 
 ---
 
+## PART 6: PRE-DESIGN DIAGNOSTIC EXECUTION
+
+This skill emits a structured `diagnostic_plan.json` for every chosen strategy and **optionally runs lightweight pre-design diagnostics** when data is available and a basic data-clearance check passes. Estimation of the headline model itself belongs to your downstream analysis pipeline; this part is about catching design problems *before* the analysis commits.
+
+### Tier 1 — `diagnostic_plan.json` (always emit)
+
+For the selected strategy, write `${OUTPUT_ROOT}/diagnostic_plan.json` with this schema. A downstream code-review or pre-execution audit can consume it to verify the planned analysis actually implements the required tests.
+
+```json
+{
+  "strategy": "<DiD | Staggered DiD | RD | IV | FE | Matching | Synthetic Control | Mediation | DML | Bunching | Bartik | Quantile | OLS>",
+  "required_diagnostics": [
+    {
+      "id": "did_event_study_pretrend_Ftest",
+      "purpose": "parallel trends",
+      "tool": "fixest::iplot + joint F-test",
+      "pass_criterion": "joint F-test on pre-treatment leads fails to reject at p > .10",
+      "execute_at": "analysis_execution",
+      "blocks_publication_if_failed": true
+    },
+    {
+      "id": "honestdid_sensitivity",
+      "purpose": "robustness to parallel-trends violations",
+      "tool": "HonestDiD::createSensitivityResults_relativeMagnitudes",
+      "pass_criterion": "estimate remains significant at M >= 1",
+      "execute_at": "analysis_execution",
+      "blocks_publication_if_failed": false
+    }
+  ],
+  "pre_design_diagnostics": [
+    {
+      "id": "panelview_treatment_structure",
+      "tool": "panelView::panelview(type='treat')",
+      "purpose": "visualize treatment timing and cohort structure",
+      "execute_at": "design_finalization"
+    }
+  ]
+}
+```
+
+Build the `required_diagnostics` array from the chosen strategy. For DiD/Staggered DiD, include at minimum: event-study pre-trend F-test, HonestDiD sensitivity, treated-group post-period mean, spillover check, and one TWFE alternative (CS-2021 / SA-2021 / LP-DiD). For RD: McCrary density, bandwidth sensitivity, covariate continuity. For IV: first-stage F, over-identification (if multiple instruments), reduced-form check. For Matching: covariate balance < 0.1 SMD, common support, Rosenbaum bounds. For Synthetic Control: in-time and in-space placebos, pre-period RMSPE. The `execute_at` field is a user-defined label naming where in your workflow each test runs.
+
+### Tier 2 — Pre-design diagnostic preview (opt-in, gated)
+
+Run only when ALL of the following hold:
+- User supplied a data path in arguments, OR a data-availability file is present in the project
+- A clearance file exists confirming the data is ethically/legally cleared for inspection (your project may use any convention; the recipe below assumes a JSON file with per-source `status` and `rationale` fields)
+- The strategy is panel-data-based (DiD, Staggered DiD, FE, Synthetic Control)
+
+**Preview vs. headline boundary (binding)**: every artifact produced by Tier 2 must be written to `${PROJ:-.}/output/diagnostics/_PREVIEW/` (the underscore-prefixed name is deliberate — `[PREVIEW]` is a shell glob metacharacter and would silently match nothing in `ls` patterns) and PDF/PNG titles must carry a `PREVIEW — NOT HEADLINE` watermark. The point of Tier 2 is to falsify a design before it is locked, not to render publication figures. Headline estimates remain the territory of your downstream analysis script.
+
+If gated open, execute these in R (do **not** estimate the headline model):
+
+#### Panel-data preview with panelview + fect
+
+The canonical staggered-DiD recipe — `panelview` for treatment-timing + missingness + outcome trajectories, then `fect` for the equivalence-test placebo — is in [`references/strategies.md` Strategy 9 → Pre-Design Diagnostic Recipe](references/strategies.md). All code blocks, citations (Mou-Liu-Xu 2023; Liu-Wang-Xu 2024), and reporting templates live there to keep the recipe single-sourced.
+
+When invoking Tier 2 for staggered DiD, load that section and adapt the variable names. Remember the binding rule from above: every artifact saves to `output/diagnostics/_PREVIEW/` (no glob metacharacters) with a `PREVIEW — NOT HEADLINE` watermark.
+
+**What the recipe catches before design is locked**: unbalanced panel; cohort sizes too small for CS-2021; treatment reversal (switchers) — which routes the design to de Chaisemartin-D'Haultfœuille `did_multiplegt_dyn` instead of CS-2021; differential attrition between treatment and control; outcome trajectories that already look suspicious.
+
+#### Synthetic-control preview with gsynth (Xu 2017, *Political Analysis* 25(1):57–76)
+
+When there are multiple treated units and rich pre-period controls — the canonical SC method does not handle this; gsynth does.
+
+```r
+# install.packages("gsynth")     # since v1.3.0 this is a wrapper for fect
+library(gsynth)
+gs <- gsynth(Y ~ D + X1 + X2, data = df, index = c("unit", "time"),
+             estimator = "ife", se = TRUE, inference = "parametric",
+             nboots = 1000, CV = TRUE, force = "two-way")
+plot(gs, type = "counterfactual")
+plot(gs, type = "gap")
+```
+
+#### Interaction-effect diagnostic with interflex (Hainmueller, Mummolo, Xu 2019)
+
+When the design's identification relies on an interaction term (heterogeneity-by-X, dose-response, conditional ATT), check the linear-interaction assumption *before* writing it into the design.
+
+```r
+# install.packages("interflex")
+library(interflex)
+ix <- interflex(Y ~ D * X1 + X2, data = df, estimator = "binning",
+                vartype = "robust", treat = "D", moderator = "X1")
+plot(ix)                              # bin estimates vs. linear interaction
+print(ix$tests$wald.test.p.value)     # Wald test for linearity
+```
+
+If the Wald test rejects, the planned design likely needs a flexible interaction (binning or kernel), not a multiplicative term — record this in your identification-strategy memo.
+
+### Gating logic
+
+```bash
+# Diagnostic gate — must reject NEEDS_REVIEW, HALTED, AND bare OVERRIDE
+# Assumes a JSON clearance file at $SAFETY with per-source {status, rationale}
+# entries; adapt the path to whatever your project uses.
+SAFETY="${PROJ:-.}/safety-status.json"
+if [ ! -f "$SAFETY" ]; then
+  echo "No clearance status found; running Tier-1 plan only."
+  RUN_TIER2=0
+elif grep -qE '"status"\s*:\s*"(NEEDS_REVIEW|HALTED)"' "$SAFETY"; then
+  echo "Clearance NEEDS_REVIEW or HALTED; running Tier-1 plan only. Complete your data-clearance review."
+  RUN_TIER2=0
+elif python3 -c "
+import json, sys
+d = json.load(open('$SAFETY'))
+# Reject if any entry is OVERRIDE without a non-empty rationale string
+def bad(e):
+    return (isinstance(e, dict) and e.get('status') == 'OVERRIDE'
+            and not (isinstance(e.get('rationale'), str) and e['rationale'].strip()))
+entries = d.get('files', d if isinstance(d, list) else [])
+sys.exit(0 if any(bad(e) for e in entries) else 1)
+" 2>/dev/null; then
+  echo "Bare OVERRIDE without rationale; running Tier-1 plan only."
+  RUN_TIER2=0
+else
+  mkdir -p "${PROJ:-.}/output/diagnostics/_PREVIEW"
+  RUN_TIER2=1
+fi
+```
+
+This gate uses the conventional "cleared-or-explicitly-overridden" semantics: `NEEDS_REVIEW`, `HALTED`, and bare `OVERRIDE` all block. A passing entry must be `CLEARED` or `OVERRIDE` with a non-empty `rationale` string. All Tier-2 outputs land in `output/diagnostics/_PREVIEW/` so they cannot be mistaken for headline artifacts.
+
+### What Tier 2 does **not** do
+
+It does not estimate the headline model. It does not produce the publication tables. It does not replace a full estimation pass. If the user wants estimates, route them forward; this skill stops at "your design is structurally sound, here is the verified plan and the assumption-check sketches, hand off to your downstream analysis pipeline."
+
+---
+
 ## Quality Checklist
 
 - [ ] Causal question stated precisely (X → Y for population P, identification context)
@@ -511,6 +678,8 @@ When using complementary strategies (e.g., PSM + OLS, FE + DiD, IV + OLS compari
 - [ ] Identification strategy selected and justified against alternatives
 - [ ] Core assumptions stated and evidence provided for each
 - [ ] Diagnostics run and reported (pre-trend test / McCrary / first-stage F / balance / etc.)
+- [ ] `diagnostic_plan.json` emitted with strategy-keyed `required_diagnostics` array (PART 6, Tier 1) — machine-readable so a downstream code review can verify the analysis actually implements each test
+- [ ] If panel data: Tier-2 `panelview` audit run (or explicitly skipped with rationale logged in `${PROJ:-.}/output/diagnostics/tier2-skip-rationale.md`) before design is locked
 - [ ] Sensitivity analysis performed (Oster delta / E-value / Rosenbaum Γ / ρ* / placebos)
 - [ ] Identification argument paragraph written and placed in Methods section
 - [ ] Limitations acknowledged

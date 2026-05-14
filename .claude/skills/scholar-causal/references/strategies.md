@@ -111,7 +111,7 @@ cs <- att_gt(yname    = "y",
              gname    = "first_treat",   # 0 = never treated
              data     = df,
              control_group = "nevertreated",
-             est_method    = "reg")
+             est_method    = "dr")   # doubly robust (default); reconciled with Strategy 9
 aggte(cs, type = "dynamic")   # Dynamic ATTs (event study)
 aggte(cs, type = "simple")    # Average ATT across all groups/periods
 ggdid(aggte(cs, type = "dynamic"))
@@ -159,11 +159,23 @@ Y_ijt = α + β₁τ_t + β₂δ_j + β₃D_i + β₄(δ_j × τ_t) + β₅(τ_t
 *Example*: Studying minimum wage on low-wage workers (affected group, i=1) vs. high-wage workers (unaffected group, i=0) in treated states (j=1) vs. control states (j=0); the DDD removes state-level time trends that affect all workers.
 
 ```r
-# Triple DiD in R via fixest
-ddd <- feols(y ~ i(post, treat_group, ref = 0):i(treat_state, ref = 0) |
-               unit + year + state^year, data = df, cluster = ~state)
+# Triple DiD in R via fixest. The DDD coefficient is the triple-interaction
+# post × treated_state × affected_group. We absorb every lower-order
+# interaction via two-way and three-way fixed effects so the regression
+# returns only the DDD term.
+ddd <- feols(
+  y ~ post:treated_state:affected_group     # the DDD term
+  | unit                                    # absorbs affected_group main effect
+  + year                                    # absorbs post main effect
+  + state^year                              # absorbs treated_state × post interactions
+  + state^affected_group                    # absorbs treated_state × affected_group
+  + year^affected_group,                    # absorbs post × affected_group
+  data = df, cluster = ~ state
+)
 summary(ddd)
 ```
+
+The fixed-effects sweep above implements the three-way decomposition: every two-way (state×year, state×affected, year×affected) and one-way main effect is absorbed, leaving only the residual triple interaction as the identified coefficient.
 
 #### Standard Error Correction (Bertrand, Duflo, Mullainathan 2004)
 
@@ -863,7 +875,11 @@ paramed outcome, avar(treat) mvar(mediator) cvars(x1 x2 x3) ///
 
 ### Strategy 9: Staggered Difference-in-Differences
 
-Use when treatment adoption is staggered across units over time (different groups treated at different times). Standard TWFE DiD is biased under treatment effect heterogeneity (Goodman-Bacon 2021).
+Use when treatment adoption is staggered across units over time (different groups treated at different times).
+
+**The motivating theorem (Goodman-Bacon 2021, *J. Econometrics* 225(2):254-277)**: the standard two-way-fixed-effects DiD estimator decomposes into a weighted average of all possible 2x2 comparisons in the panel. One subset of those 2x2s uses already-treated units as the "control" group for newly-treated units; that control path includes the already-treated unit's evolving treatment effect. Under treatment-effect heterogeneity over time, the implicit weight on this contaminated 2x2 can be negative, and the aggregate TWFE estimate can flip sign relative to every individual ATT. Under homogeneous effects TWFE remains unbiased — the problem is heterogeneity, not the comparison per se.
+
+Every estimator in this strategy fixes the problem the same way: by restricting comparisons to never-treated or not-yet-treated units only.
 
 #### When to use
 - Multiple groups adopt treatment at different times
@@ -874,26 +890,57 @@ Use when treatment adoption is staggered across units over time (different group
 
 **Callaway and Sant'Anna (2021) — preferred:**
 
+For a fully runnable template covering the entire CS-2021 workflow (simulated example, real-data minimum-wage example, all four aggregations, alternative control groups, conditional pre-test, reporting checklist), see [`did-cs-workflow.R`](did-cs-workflow.R) in this directory. Inline starter:
+
 ```r
 library(did)
 cs_out <- att_gt(
   yname   = "y",
   tname   = "year",
   idname  = "id",
-  gname   = "first_treat_year",  # 0 for never-treated
+  gname   = "first_treat_year",       # 0 for never-treated
   data    = df,
-  control_group = "nevertreated",  # or "notyettreated"
-  est_method    = "dr",            # doubly robust (recommended)
-  xformla       = ~ x1 + x2       # covariates
+  control_group = "nevertreated",     # or "notyettreated"
+  est_method    = "dr",               # doubly robust (default); also "ipw", "reg"
+  xformla       = ~ x1 + x2           # covariates → conditional parallel trends
 )
-# Aggregate to event-study
-es <- aggte(cs_out, type = "dynamic", min_e = -5, max_e = 5)
-ggdid(es) + theme_Publication()
+summary(cs_out)   # group-time effects + simultaneous-CI pre-test p-value
 
-# Aggregate to overall ATT
-overall <- aggte(cs_out, type = "simple")
-summary(overall)
+# CS-2021 recommends pairing a dynamic figure with a single-number summary.
+# `simple` and `group` are DIFFERENT ESTIMANDS, not interchangeable summaries:
+# `simple` weights by group size × exposure length (overweights early cohorts);
+# `group` weights cohorts equally after averaging within. Choose by research
+# question. See CS-2021 §4.2 and Roth-Sant'Anna-Bilinski-Poe (2023).
+es      <- aggte(cs_out, type = "dynamic", min_e = -5, max_e = 5); summary(es); ggdid(es)
+# NOTE: min_e/max_e silently drops cohorts that cannot be observed at the
+# requested event-time window. Verify cohort sizes after restriction; in
+# short pre-periods or staggered designs the effective estimand can change.
+overall <- aggte(cs_out, type = "simple");                        summary(overall)
+by_g    <- aggte(cs_out, type = "group");                         summary(by_g)
+by_t    <- aggte(cs_out, type = "calendar");                      summary(by_t)
+
+# Balanced event study: every cohort must have >= (balance_e + 1) observable
+# post-treatment periods. Removes composition shifts at long event times.
+es_bal  <- aggte(cs_out, type = "dynamic", balance_e = 1); summary(es_bal)
+
+# Conditional parallel-trends pre-test — the right diagnostic when the
+# conditional-PT assumption is what identifies the design. Its primary
+# value-add is for CONTINUOUS covariates X: it tests parallel trends
+# conditional on X via an integrated-moments / Cramer-von-Mises-type
+# statistic on the X distribution (CS-2021 Sec. 5), catching violations
+# that the pooled coefficient pre-test averages over the support of X.
+# It also catches the easier categorical-cancellation case (e.g.,
+# opposite-sign pre-trends for men vs. women) as a special case.
+cdp <- conditional_did_pretest("y", "year", "id", "first_treat_year",
+                               xformla = ~ x1 + x2, data = df)
+summary(cdp)
 ```
+
+**CS-2021 reporting caveats (from the package vignette)**:
+
+1. The package reports **simultaneous** confidence bands, not pointwise — this is the correct multiple-testing adjustment for an event-study plot.
+2. *"Whether or not the parallel trends assumption holds in pre-treatment periods does not actually tell you if it holds in the current period (and this is when you need it to hold!)"* Pre-tests are credibility evidence, not validation.
+3. Pair the headline aggregation with at least one TWFE-free alternative from the Modern DiD Battery below (Sun-Abraham, LP-DiD, or Borusyak imputation) plus HonestDiD sensitivity.
 
 **Sun and Abraham (2021) — interaction-weighted:**
 
@@ -920,8 +967,210 @@ did_imp <- did_imputation(
 - Pre-trend test: event-study coefficients on pre-treatment periods jointly = 0
 - Compare TWFE vs. CS/SA estimates — divergence signals heterogeneity bias
 
+#### Pre-Design Diagnostic Recipe (panelview + fect)
+
+Before committing to a staggered-DiD estimator, run the Xu-Liu panel-audit suite — it catches design defects (cohort imbalance, switchers, differential attrition) that no post-execution test can fix.
+
+**Treatment-structure + missingness audit (Mou, Liu, Xu 2023, *JSS* 107(7))**:
+
+```r
+library(panelView); library(ggplot2)
+# All outputs land in the preview directory with a watermark, per SKILL.md PART 6
+# Tier-2 boundary. The underscore-prefixed name avoids shell-glob metacharacters.
+dir.create("output/diagnostics/_PREVIEW", recursive = TRUE, showWarnings = FALSE)
+wm <- labs(caption = "PREVIEW — NOT HEADLINE")
+
+p1 <- panelview(Y ~ D, data = df, index = c("unit", "time"),
+                type = "treat", by.timing = TRUE) + wm
+ggsave("output/diagnostics/_PREVIEW/panelview-treatment.pdf", p1, width = 9, height = 6)
+
+p2 <- panelview(Y ~ D, data = df, index = c("unit", "time"), type = "missing") + wm
+ggsave("output/diagnostics/_PREVIEW/panelview-missing.pdf",   p2, width = 9, height = 6)
+
+p3 <- panelview(Y ~ D, data = df, index = c("unit", "time"),
+                type = "outcome", by.cohort = TRUE) + wm
+ggsave("output/diagnostics/_PREVIEW/panelview-outcome.pdf",   p3, width = 9, height = 6)
+```
+
+**What to look for**: any cohort with < 5 treated units (triggers Lee-Wooldridge small-cluster fallback); units that switch out of treatment (breaks absorbing assumption and rules out plain CS-2021); differential missingness between treatment and control (consider IPW or attrition bounds); pre-period trajectories that diverge before treatment (parallel trends already implausible).
+
+**Counterfactual placebo test (Liu, Wang, Xu 2024, *AJPS* 68(1):160–176)**:
+
+```r
+library(fect); library(ggplot2)
+dir.create("output/diagnostics/_PREVIEW", recursive = TRUE, showWarnings = FALSE)
+fec <- fect(Y ~ D, data = df, index = c("unit", "time"),
+            method = "fe", force = "two-way", CV = TRUE,
+            se = TRUE, parallel = TRUE,
+            placeboTest = TRUE, placebo.period = c(-2, 0))
+print(fec)
+p_eq <- plot(fec, type = "equiv") + labs(caption = "PREVIEW — NOT HEADLINE")
+ggsave("output/diagnostics/_PREVIEW/fect-equivalence.pdf", p_eq, width = 9, height = 6)
+```
+
+`fect`'s equivalence test is *differently directed* from the standard pre-trend F-test, not strictly stronger. The F-test has null "pre-trends = 0", so failure to reject ≠ evidence of parallel trends. The equivalence test (TOST-style) has null "pre-trends lie outside the equivalence margin δ", so a rejection *does* support PT-within-δ. Whether the equivalence test rejects more or less often than the F-test depends entirely on the chosen δ relative to sample size. The two tests answer complementary questions; reporting both shifts the burden of proof appropriately and pairs naturally with HonestDiD sensitivity bounds (PART 4).
+
 #### Write-up template
 > "Because treatment adoption was staggered across [units] from [year1] to [year2], standard TWFE DiD may produce biased estimates under heterogeneous treatment effects (Goodman-Bacon 2021). We employ the Callaway and Sant'Anna (2021) estimator with doubly robust estimation, using [never-treated / not-yet-treated] units as the comparison group. We report group-time ATT estimates aggregated to an event-study specification and an overall ATT."
+
+#### Modern DiD Battery (2024-2026)
+
+Since the Callaway-Sant'Anna / Sun-Abraham wave, four further developments have become standard reviewer asks at top economics, sociology, public-health, and political-science journals. Treat them as a default battery rather than separate alternatives: a modern DiD paper typically runs at least two in addition to its headline estimator.
+
+##### LP-DiD — Dube, Girardi, Jordà, Taylor (2025)
+
+**Citation**: Dube, A., Girardi, D., Jordà, Ò., & Taylor, A. M. (2025). A local projections approach to difference-in-differences. *Journal of Applied Econometrics*. NBER WP 31184 (2023).
+
+**Why it matters**: Runs a separate regression per post-treatment horizon, restricting each regression to newly-treated units versus a clean-control sample of units not-yet-treated through that horizon. This sidesteps the forbidden-comparisons negative-weighting problem without the group-time machinery of CS-2021. Naturally accommodates non-absorbing treatment, covariates, and reweighting.
+
+**Stata**:
+
+```stata
+ssc install lpdid, replace
+lpdid y, unit(id) time(year) treatment(D) ///
+        pre_window(5) post_window(10) pmd(max)   // clean controls; pooled mean differences
+lpdid_plot, ci_lvl(95)
+```
+
+**R (DIY recipe with fixest)**: For each horizon h in [-K, +K], build a clean panel of newly-treated-at-t vs. controls untreated through t+h, then regress (y_{t+h} − y_{t-1}) on D_t with unit and time fixed effects; stack the horizon coefficients into an event-study figure.
+
+**Note on the LP-DiD family**: Dube-Girardi-Jordà-Taylor present a *family* of estimators distinguished by the weighting/normalization scheme — the `pmd(max)` ("pooled mean differences") variant shown above is one choice; the paper also discusses `pmd(equal)`, `pmd(by_cohort)`, and unweighted-with-controls variants that recover different target estimands (ATT^o vs ATT_g vs ATT_e). Pick by what summary the research question asks for; do not treat LP-DiD as a single estimator. The protection from forbidden comparisons comes from the horizon-specific clean-control sample restriction, NOT from dropping fixed effects — every variant retains unit and time fixed effects within each horizon regression.
+
+##### Stacked DiD with corrective weights — Wing, Freedman, Hollingsworth (2024)
+
+**Citation**: Wing, C., Freedman, S. M., & Hollingsworth, A. (2024). Stacked Difference-in-Differences. NBER Working Paper 32054.
+
+**Why it matters**: Plain stacked DiD applies different implicit weights to treatment and control cohort trends, so it does not identify any well-defined aggregate ATT. The corrective-weights estimator fixes this and recovers a Trimmed Aggregate ATT that excludes edge cohorts to maintain stable event-study composition. The term "trimmed aggregate ATT" is verbatim from the NBER WP 32054 abstract: *"This paper introduces the concept of a 'trimmed aggregate ATT,' which is a weighted average of a set of group-time average treatment effect on the treated (ATT) parameters identified in a staggered adoption difference-in-differences (DID) design."* (Wing, Freedman, & Hollingsworth 2024, NBER WP 32054, abstract.)
+
+**Implementation**: Reference code at `github.com/hollina/stacked-did-weights`. Build the stacked panel, compute corrective weights per (event-time, cohort) cell, then run weighted TWFE on the stacked data with cohort × calendar-time fixed effects.
+
+##### Doubly-robust CATT for continuous moderators — Imai, Qin, Yanagi (2025)
+
+**Citation**: Imai, K., Qin, Z., & Yanagi, T. (2025). Doubly robust uniform confidence bands for group-time conditional average treatment effects in difference-in-differences. *Journal of Business & Economic Statistics* (forthcoming). arXiv 2305.02185.
+
+**Why it matters**: When treatment effects are theorized to vary along a continuous pre-treatment covariate (baseline income, age, exposure intensity), a pooled ATT loses information. `didhetero` gives doubly-robust *uniform* confidence bands for the CATT function in the CS-2021 staggered-DiD setup, so claims about the *shape* of heterogeneity are themselves inferentially valid.
+
+**R** (schematic — the package is GitHub-only and signature evolves; verify against `?catt_gt_dr` after install):
+
+```r
+# remotes::install_github("tkhdyanagi/didhetero", build_vignettes = TRUE)
+library(didhetero)
+vignette("didhetero")   # current signature, defaults, and worked example
+
+# Conceptually: fit CS-2021 ATT(g,t) first, then pass to didhetero with the
+# continuous pre-treatment moderator. Output is a uniform confidence band for
+# the CATT function — so claims about the SHAPE of heterogeneity in the
+# moderator are inferentially valid, not just pointwise.
+```
+
+##### Spillover-aware DiD — Butts (2023) and Clarke (2017)
+
+**Citations**:
+- Butts, K. (2023). *Difference-in-Differences Estimation with Spatial Spillovers.* arXiv 2105.03737 (rev. June 2023). Code: github.com/kylebutts/Spatial-Spillover.
+- Clarke, D. (2017). *Estimating Difference-in-Differences in the Presence of Spillovers.* MPRA 81604.
+
+**Why it matters**: SUTVA is listed as a primary DiD assumption and then routinely abandoned. When control units are spatially or socially proximate to treated units — adjacent counties under a state-level policy, neighboring schools under a district reform, firms in connected supply chains — the control group itself absorbs some of the treatment effect via spillover. The classical DiD then misidentifies the ATT on two counts: (1) the control trend no longer estimates the counterfactual because controls are also affected, and (2) treated unit outcomes reflect both their own treatment status and the exposure from nearby treated units.
+
+**Two approaches**:
+
+- **Butts (2023)** introduces a potential-outcomes framework (after Vazquez-Bare 2023) where each unit's potential outcomes depend on its own treatment **and** an exposure measure summarizing nearby units' treatment. He provides non-parametric identification conditions that recover both the direct ATT *and* the spillover effect, including in staggered-timing settings. Implementation code at `github.com/kylebutts/Spatial-Spillover`.
+
+- **Clarke (2017)** proposes a weaker-than-SUTVA assumption: SUTVA holds between units beyond some distance threshold from the treatment cluster. The method estimates a "close-to-treatment" effect alongside the direct effect, with a data-driven procedure for choosing the distance over which spillovers propagate. Applied to U.S. text-messaging-ban laws, the paper documents spillover effects up to 30 km outside affected jurisdictions.
+
+**Diagnostic when to invoke**: any DiD design where (a) the treatment is geographically defined and controls are spatially adjacent, (b) units are connected by trade/migration/network ties, or (c) the substantive mechanism plausibly propagates beyond the formal treatment boundary. Run a border-placebo (estimate the "effect" on the nearest-untreated band of controls) as a first-pass diagnostic; if the placebo is non-zero, spillover-robust estimation is mandatory rather than optional.
+
+**Reporting note**: report both the direct ATT and the spillover effect, with explicit characterization of the distance/network metric used. Demography, AJS, and ASR reviewers increasingly flag DiD papers that assume away spillovers in spatially-defined policy settings.
+
+##### Heterogeneity-robust DiD with switchers — de Chaisemartin & D'Haultfœuille (2024)
+
+**Citation**: de Chaisemartin, C., & D'Haultfœuille, X. (2024). *Difference-in-Differences Estimators of Intertemporal Treatment Effects.* R package `DIDmultiplegtDYN` (CRAN) / Stata `did_multiplegt_dyn`.
+
+**Why it matters**: CS-2021, Sun-Abraham, and Borusyak imputation all assume the treatment is **absorbing** (once treated, always treated). When treatment can switch off and on — e.g., laws that get repealed, employment spells, on/off intervention regimes — those estimators are not consistent. `did_multiplegt_dyn` handles non-absorbing and non-binary (discrete or continuous) treatments that increase or decrease multiple times, with heterogeneity-robust event-study estimators.
+
+**R**:
+
+```r
+# install.packages("DIDmultiplegtDYN")
+library(DIDmultiplegtDYN)
+es <- did_multiplegt_dyn(
+  df               = df,
+  outcome          = "y",
+  group            = "id",
+  time             = "year",
+  treatment        = "D",          # binary or non-binary, may switch
+  effects          = 5,            # number of dynamic effects
+  placebo          = 3,            # number of pre-trend placebos
+  only_never_switchers = FALSE,    # set TRUE to restrict to never-switchers as control
+  predict_het      = NULL          # group-level moderator for heterogeneity
+)
+summary(es); plot(es)
+```
+
+**Use this when**: the pre-design `panelview` audit reveals units switching out of treatment. The skill's panelview recipe in Strategy 9 explicitly flags this case; `did_multiplegt_dyn` is the canonical fix.
+
+##### Small-cluster collapse — Lee & Wooldridge (2026)
+
+**Citation**: Lee, S. J., & Wooldridge, J. M. (2026). Simple Approaches to Inference with Difference-in-Differences Estimators with Small Cross-Sectional Sample Sizes. SSRN 5325686.
+
+**Why it matters**: Cluster-robust SEs break down with ≤ 5 treated or control clusters. Collapsing each unit's pre- and post-treatment series into two-period averages turns the panel into a small cross-section where classical-linear-model inference (or randomization inference) is valid.
+
+**Caveat**: the "exact inference available with as few as 1 treated + 2 control units" claim relies on the **collapsed within-unit pre/post averages being approximately normal** — i.e., the pre and post time series are long enough and well-behaved enough that the central limit theorem across time kicks in. It is not a free lunch with short panels.
+
+**Use when**: any cohort has ≤ 5 treated units AND the pre/post series are long enough to support the collapse assumption; or as a robustness fallback whenever wild-bootstrap is the only alternative.
+
+##### Anticipation testing — the `anticipation` argument
+
+CS-2021 lists "no anticipation" as a primary identifying assumption alongside parallel trends, but the skill's documentation has mostly left it as a one-line assertion. The `did` package exposes an explicit `anticipation = k` argument to `att_gt()` that *allows* treatment effects to begin up to `k` periods before treatment, returning ATT estimates that condition on this anticipation window. The standard diagnostic is to compare estimates across `anticipation ∈ {0, 1, 2}` and report whether the headline ATT is stable.
+
+**R**:
+
+```r
+# Baseline: no anticipation
+cs0 <- att_gt(yname = "y", tname = "year", idname = "id", gname = "first_treat_year",
+              xformla = ~ 1, data = df, control_group = "nevertreated", est_method = "dr")
+
+# Allow 1-period anticipation: effects may begin at t = g-1
+cs1 <- att_gt(yname = "y", tname = "year", idname = "id", gname = "first_treat_year",
+              xformla = ~ 1, data = df, control_group = "nevertreated", est_method = "dr",
+              anticipation = 1)
+
+# Allow 2-period anticipation
+cs2 <- att_gt(yname = "y", tname = "year", idname = "id", gname = "first_treat_year",
+              xformla = ~ 1, data = df, control_group = "nevertreated", est_method = "dr",
+              anticipation = 2)
+
+# Compare aggregated ATT across anticipation windows
+sapply(list(cs0, cs1, cs2), function(o) aggte(o, type = "simple")$overall.att)
+```
+
+**Reporting**: if the simple ATT is stable across `anticipation ∈ {0, 1, 2}`, state so explicitly. If it moves substantially, the headline estimand is contaminated by anticipation and either the design needs an explicit anticipation window or a more aggressive lead test is required. Pair with the event-study leads coefficients: significant pre-treatment leads are the visual analog of failed anticipation, and a non-zero coefficient one period before treatment is the standard tell.
+
+##### Pre-test caution — Roth (2022, *AER:Insights* 4(3):305-322)
+
+**Citation**: Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *AER: Insights* 4(3):305-322.
+
+**Why it matters**: Two distinct problems with conventional pre-trend testing in DiD. (1) **Low power** — standard F-tests for pre-trends are often unable to detect parallel-trends violations of magnitudes comparable to the estimated treatment effect itself. (2) **Pre-test bias** — *conditioning the analysis on having passed a pre-test* distorts the post-treatment estimate and undercovers confidence intervals. Counter-intuitively, the bias from a parallel-trends violation can be **worse** conditional on passing the pre-test.
+
+**Implication for reporting**: do not interpret a non-significant pre-trend F-test as validation of parallel trends. The Roth (2022) recommendation is to (a) report **power** of the pre-test against effect-sized violations, (b) report **HonestDiD sensitivity bounds** (PART 4) as the actual robustness statement, and (c) avoid pre-test-conditional inference. The CS-2021 vignette's own caveat that pre-treatment PT "does not actually tell you" about post-treatment PT is the qualitative version of the same point.
+
+##### Reporting practice — treated-group post-period mean
+
+After Samii, C. (2025), "Reporting the treated group mean along with DID estimates" — blog post at *cyrussamii.com* (Nov 2025). NOT a peer-reviewed publication; treated here as a practitioner-rule-of-thumb rather than a citable methodological result. Substance: report the post-treatment outcome **level** for the treated group alongside the ATT. A small percentage effect on a tiny base is not the same finding as a small percentage effect on a large base, and reviewers increasingly flag DiD papers that report only relative effects.
+
+##### Reviewer-anticipation battery (2026)
+
+Run before submission, not after R&R:
+
+1. **Event-study pre-trend joint F-test AND equivalence test (`fect`)** — report both. Do not interpret a non-significant F as validation; pre-test power is low and pre-test-conditional inference is biased (Roth 2022).
+2. **HonestDiD breakdown M-bar** as the actual robustness statement for parallel-trends violations (PART 4 has the full spec with relative-magnitudes and smoothness bounds).
+3. At least one alternative to TWFE: Callaway-Sant'Anna, Sun-Abraham, **or** LP-DiD.
+4. A second alternative if staggered. Choose by assumption: **Borusyak-Jaravel-Spiess imputation** if homogeneous-effects-by-cohort is defensible (it imposes stronger structure); **Stacked DiD with corrective weights** otherwise.
+5. If treatment can **switch off** (non-absorbing), use **de Chaisemartin-D'Haultfœuille `did_multiplegt_dyn`** instead — CS-2021 / SA / BJS / Stacked all assume absorbing treatment.
+6. `didhetero` continuous-moderator slice if heterogeneity along a continuous covariate is theorized.
+7. Small-cluster fallback (Lee-Wooldridge) if any cohort has ≤ 5 treated units AND pre/post series are long enough to support the collapse.
+8. **`conditional_did_pretest`** if `xformla` is used in the headline recipe (i.e., the design relies on conditional rather than unconditional parallel trends). Reporting only the pooled coefficient pre-test in that case is the wrong diagnostic.
+9. **Spillover diagnostic** if the design is geographically or network-defined: border placebo on the nearest-untreated band of controls; if non-zero, switch to spillover-robust estimation (Butts 2023 or Clarke 2017) and report direct AND spillover effects.
+10. Treated-group post-period **outcome level** reported alongside the ATT (Samii 2025 blog; non-peer-reviewed, treat as practitioner heuristic). Report number of treated cohorts and cohort sizes from the panelView audit.
 
 ---
 
