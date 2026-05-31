@@ -397,6 +397,58 @@ else
   echo "    stderr:"; echo "$OUT" | sed 's/^/      /'
 fi
 
+# ─── Test 18: --scaffold creates an empty project from a slug only ─────
+echo ""
+echo "Test 18: --scaffold creates an empty project with no inputs"
+SCAFF="$TMPDIR_BASE/scaffold"
+mkdir -p "$SCAFF"
+OUT=$(bash "$INIT_SCRIPT" --dest "$SCAFF" --scaffold my-empty 2>&1 || true)
+PROJ="$SCAFF/my-empty"
+if [ -d "$PROJ/data/raw" ] && [ -d "$PROJ/data/interim" ] && [ -d "$PROJ/data/processed" ] \
+   && [ -d "$PROJ/materials" ] && [ -d "$PROJ/output" ] && [ -d "$PROJ/logs" ] && [ -d "$PROJ/.claude" ]; then
+  pass "scaffold created the full standard layout"
+else
+  fail "scaffold did not create the full standard layout"
+  echo "$OUT" | sed 's/^/      /'
+fi
+if [ -f "$PROJ/.claude/safety-status.json" ] && [ "$(jq -r 'length' "$PROJ/.claude/safety-status.json" 2>/dev/null)" = "0" ]; then
+  pass "scaffold wrote an empty {} safety sidecar"
+else
+  fail "scaffold sidecar missing or non-empty"
+fi
+if [ -f "$PROJ/README.md" ] && [ -f "$PROJ/.gitignore" ] && [ -f "$PROJ/logs/init-report.md" ]; then
+  pass "scaffold wrote README, .gitignore, init-report.md"
+else
+  fail "scaffold missing README/.gitignore/init-report.md"
+fi
+if echo "$OUT" | grep -q "scholar-init add"; then
+  pass "scaffold summary points the user to 'scholar-init add'"
+else
+  fail "scaffold summary did not mention the add next-step"
+fi
+
+# ─── Test 19: --scaffold rejects input files ───────────────────────────
+echo ""
+echo "Test 19: --scaffold rejects input files"
+OUT=$(bash "$INIT_SCRIPT" --dest "$SCAFF" --scaffold badproj "$PROJ/README.md" 2>&1 || true)
+if echo "$OUT" | grep -q "takes no input files"; then
+  pass "--scaffold + files rejected with a clear message"
+else
+  fail "--scaffold + files not rejected correctly"
+  echo "$OUT" | sed 's/^/      /'
+fi
+
+# ─── Test 20: no inputs and no --scaffold still errors ─────────────────
+echo ""
+echo "Test 20: no inputs and no --scaffold still errors"
+OUT=$(bash "$INIT_SCRIPT" --dest "$SCAFF" noinput 2>&1 || true)
+if echo "$OUT" | grep -q "at least one input file or directory is required"; then
+  pass "missing inputs without --scaffold errors"
+else
+  fail "missing inputs without --scaffold did not error as expected"
+  echo "$OUT" | sed 's/^/      /'
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════"

@@ -15,14 +15,17 @@ open-scholar-skill/
 ├── README.md / USAGE.md         # User-facing docs
 ├── scripts/gates/               # Executable gate scripts (version-check, safety-scan, verify-citations,
 │                                #   pretooluse-data-guard, init-handshake, derive-proj, phase-verify)
-├── scripts/init-project.sh      # Project initializer used by scholar-init
+├── scripts/init-project.sh      # Project initializer used by scholar-init (--scaffold for empty layout)
+├── scripts/detect-host-agent.sh # Detects host AI tool (Claude Code → CLAUDE.md, Codex → AGENTS.md)
+├── scripts/phases/              # setup-project-claudemd.sh — writes the auto-managed memory block
+├── scripts/templates/          # claudemd-auto-rules-lean.md — the cross-skill rules block
 ├── tests/smoke/                 # Smoke tests (run: bash tests/smoke/run-all.sh)
 ├── skills/ → .claude/skills/    # Symlink (DO NOT replace with directory)
 ├── agents/ → .claude/agents/    # Symlink (DO NOT replace with directory)
 └── .claude/
     ├── skills/                  # 31 skill directories, each with SKILL.md + references/
-    │   ├── _shared/             # Shared protocols (process-logger.md, version-check.md, data-handling-policy.md, tier-b-safety-gate.md)
-    │   ├── scholar-init/        # v5.9.0 — project initializer + data safety sidecar populator (4 modes: init/review/add/status)
+    │   ├── _shared/             # Shared protocols (process-logger.md, version-check.md, data-handling-policy.md, tier-b-safety-gate.md, objectivity-mandate.md)
+    │   ├── scholar-init/        # v5.13.0 — project initializer + data safety sidecar + auto-managed memory file (4 modes: init/review/add/status; --scaffold slug-only path)
     │   ├── scholar-analyze/     # Components loaded on-demand via references/component-a-*.md
     │   ├── scholar-auto-improve/# Continuous quality engine (4 modes)
     │   ├── scholar-brainstorm/  # Data-driven RQ generation from codebooks/questionnaires/datasets
@@ -56,7 +59,7 @@ open-scholar-skill/
     └── agents/                  # 19 agents (9 peer-reviewer + 4 verify + 6 code-review)
 ```
 
-**Version**: v5.12.0 — 32 skills, 19 agents (9 peer-reviewer + 4 verify + 6 code-review)
+**Version**: v5.13.0 — 32 skills, 19 agents (9 peer-reviewer + 4 verify + 6 code-review)
 
 ---
 

@@ -13,7 +13,7 @@
 #   │   ├── interim/              ← empty, scripts write here
 #   │   └── processed/            ← empty, analytic datasets
 #   ├── materials/                ← codebooks, questionnaires, protocols
-#   ├── output/                   ← scholar-full-paper Phase 0 populates this
+#   ├── output/                   ← analysis/writing skills populate this
 #   └── logs/
 #       └── init-report.md        ← permanent ingest record
 #
@@ -25,6 +25,10 @@
 #   --link              Symlink raw files instead of copying (default: copy)
 #   --materials <path>  Treat this file/dir as materials/ not data/raw/.
 #                       May be given multiple times.
+#   --scaffold          Create the empty standard layout only (no input files
+#                       required). Use when the user wants to stand up the
+#                       project skeleton first and point at data/materials
+#                       afterwards (then ingest with `scholar-init add`).
 #   --force             Overwrite an existing <dest>/<slug> directory
 #   -h, --help          Show this help
 #
@@ -48,6 +52,7 @@ usage() {
 DEST="."
 LINK_MODE=0
 FORCE=0
+SCAFFOLD=0
 SLUG=""
 MATERIALS_INPUTS=()
 RAW_INPUTS=()
@@ -79,6 +84,7 @@ while [ $# -gt 0 ]; do
         exit 1
       fi
       MATERIALS_INPUTS+=("$2"); shift 2 ;;
+    --scaffold)   SCAFFOLD=1; shift ;;
     --force)      FORCE=1; shift ;;
     -h|--help)    usage 0 ;;
     --)           shift; break ;;
@@ -134,16 +140,27 @@ fi
 ALL_INPUTS=()
 [ ${#RAW_INPUTS[@]} -gt 0 ]       && ALL_INPUTS+=("${RAW_INPUTS[@]}")
 [ ${#MATERIALS_INPUTS[@]} -gt 0 ] && ALL_INPUTS+=("${MATERIALS_INPUTS[@]}")
-if [ ${#ALL_INPUTS[@]} -eq 0 ]; then
-  echo "error: at least one input file or directory is required" >&2
+# --scaffold stands up the empty layout with no inputs; the skill prompts the
+# user for data/materials afterwards and ingests them via `scholar-init add`.
+# Outside scaffold mode, at least one input is still required.
+if [ "$SCAFFOLD" = 0 ] && [ ${#ALL_INPUTS[@]} -eq 0 ]; then
+  echo "error: at least one input file or directory is required (or pass --scaffold for an empty project)" >&2
   usage 1
 fi
-for f in "${ALL_INPUTS[@]}"; do
-  if [ ! -e "$f" ]; then
-    echo "error: input not found: $f" >&2
-    exit 1
-  fi
-done
+if [ "$SCAFFOLD" = 1 ] && [ ${#ALL_INPUTS[@]} -gt 0 ]; then
+  echo "error: --scaffold creates an empty project and takes no input files; drop --scaffold to ingest, or run 'scholar-init add' afterwards" >&2
+  usage 1
+fi
+# Guard the expansion: under bash 3.2 + `set -u`, "${ALL_INPUTS[@]}" on an
+# empty array (the --scaffold case) throws "unbound variable".
+if [ ${#ALL_INPUTS[@]} -gt 0 ]; then
+  for f in "${ALL_INPUTS[@]}"; do
+    if [ ! -e "$f" ]; then
+      echo "error: input not found: $f" >&2
+      exit 1
+    fi
+  done
+fi
 
 # ─── Locate safety-scan.sh ──────────────────────────────────────────────
 if [ ! -f "$SAFETY_SCAN" ]; then
@@ -568,7 +585,7 @@ __SLUG__/
 │   └── processed/           ← analytic datasets used by models
 ├── materials/               ← codebooks, questionnaires, protocols
 ├── output/
-│   └── __SLUG__/            ← scholar-full-paper Phase 0 populates this
+│   └── __SLUG__/            ← analysis/writing skills populate this
 │       ├── tables/          ← regression tables (HTML / TeX / docx)
 │       ├── figures/         ← plots (PDF / PNG)
 │       ├── eda/             ← scholar-eda outputs
@@ -586,7 +603,7 @@ analytic dataset goes in `data/processed/`. This keeps provenance traceable.
 
 ### The data safety model (important — please read)
 
-Open-scholar-skills ships with a **PreToolUse hook** registered globally in
+Open Scholar Skill ships with a **PreToolUse hook** registered globally in
 `~/.claude/settings.json`. Every time Claude tries to `Read` a file in this
 project (or any project), the hook runs `scripts/gates/safety-scan.sh` and
 checks `.claude/safety-status.json` before the file is allowed to enter
@@ -764,6 +781,13 @@ fi
 echo "  Next steps:"
 echo "    cd \"$PROJ_DIR\""
 echo "    cat README.md          # read the operating manual"
+if [ "$SCAFFOLD" = 1 ]; then
+  echo ""
+  echo "  ▸ Empty scaffold created (--scaffold). No data or materials ingested yet."
+  echo "    Point scholar-init at your files to ingest + scan them:"
+  echo "      /scholar-init add <data-file-or-dir> [--materials <codebook>]"
+  echo "    or drop files into data/raw/ and materials/, then run /scholar-init add."
+fi
 if [ "$NEEDS_REVIEW_COUNT" -gt 0 ]; then
   echo "    /scholar-init review   # resolve NEEDS_REVIEW entries"
 fi

@@ -28,6 +28,7 @@ Parse to determine the mode and the relevant inputs.
 |------------------------|-------------|
 | `init`                 | MODE 1 (explicit init) |
 | A slug-looking string (`^[a-z][a-z0-9-]{1,63}$`) followed by one or more file paths | MODE 1 (implicit init) |
+| A slug-looking string with **no file paths** (e.g. `/scholar-init immigrant-wage-penalty`) | MODE 1 (scaffold-first init — Step 1.1.5) |
 | `review`               | MODE 2      |
 | `add`                  | MODE 3      |
 | `status`               | MODE 4      |
@@ -57,6 +58,43 @@ If the user gave you a topic description instead of a slug (e.g., `/scholar-init
 
 If the user provided files via a directory (e.g., `~/Downloads/nhanes-files/`), use Glob to list them first, then present a picking table — one row per file with name, size, extension — and ask the user which should go into `data/raw/` vs. `materials/` vs. be ignored.
 
+### Step 1.1.5 — Scaffold-first path (slug only, no files yet)
+
+If the user gave a slug but **no file paths at all** (`RAW_INPUTS` and `MATERIALS` are both empty), do NOT error. The user wants to stand up the project skeleton first and point at data/materials afterwards. Run the scaffold path:
+
+**(a) Create the empty standard layout.**
+
+```bash
+SCRIPT="${SCHOLAR_SKILL_DIR:-.}/scripts/init-project.sh"
+bash "$SCRIPT" ${DEST:+--dest "$DEST"} --scaffold "$SLUG"
+```
+
+This creates `data/raw/`, `data/interim/`, `data/processed/`, `materials/`, `output/`, `logs/`, and `.claude/` (with an empty `safety-status.json`), plus `README.md`, `.gitignore`, and `logs/init-report.md`. No files are ingested and nothing is scanned yet. Surface the script's summary block verbatim.
+
+**(b) Then run Step 1.2.5** (auto-managed memory file) against the new project directory, so the project carries the cross-skill rules even while empty.
+
+**(c) Prompt the user to point at their data and materials.** Ask, in one message:
+
+```
+Empty project scaffolded at <project-dir>. Now point me at your files:
+
+  • Data        — datasets to analyze (CSV/DTA/SAV/Parquet/…) → go to data/raw/
+  • Materials   — codebooks, questionnaires, protocols          → go to materials/
+
+You can either:
+  [1] Paste the paths here (data first, then which are materials), or
+  [2] Drop the files into data/raw/ and materials/ yourself, then tell me "done".
+
+If you don't have the data yet, that's fine — say so, and I'll leave the
+skeleton ready. Run /scholar-init add <files> whenever the data arrives.
+```
+
+**(d) When the user supplies paths**, ingest each one into the now-existing project using the **MODE 3 (add)** flow — copy/link into `data/raw/` (or `materials/` for `--materials` items), run `safety-scan.sh`, update `.claude/safety-status.json` via `jq`, and append an "Added:" row to `logs/init-report.md`. If the user dropped files in manually, enumerate `data/raw/` and `materials/` with Glob and scan each unscanned file the same way. Then continue to Step 1.3 (review NEEDS_REVIEW) and Step 1.4 (recommend next skill).
+
+**(e) If the user has no data yet**, stop after the scaffold + memory file. Recommend `/scholar-idea` or `/scholar-brainstorm materials <codebook>` if they have a codebook, and remind them that `/scholar-init add <files>` ingests data later. Do not loop waiting.
+
+> When files **were** provided up front, skip this step and use Step 1.2 below.
+
 ### Step 1.2 — Invoke the init script
 
 Construct and run the script:
@@ -74,6 +112,28 @@ bash "$SCRIPT" \
 where `MATERIALS_FLAGS` is one `--materials "<path>"` per materials input.
 
 Capture the script's stdout and display the key parts to the user. The script prints a summary block at the end; surface that verbatim.
+
+### Step 1.2.5 — Write the auto-managed project memory file
+
+The project's memory file (`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex — auto-detected) carries an auto-managed block that loads in **every future session** in this project directory, including sessions that invoke a standalone skill like `/scholar-eda`, `/scholar-analyze`, `/scholar-write`, or `/scholar-respond`. Because this fork is modular and researcher-in-the-loop (no full-paper orchestrator), this is exactly the moment to install the cross-skill rules: each skill you run individually will then inherit them.
+
+Run the setup script against the project directory created in Step 1.1.5 or Step 1.2 (`${DEST:-.}/$SLUG`):
+
+```bash
+PROJ_DIR="${DEST:-.}/$SLUG"
+bash "${SCHOLAR_SKILL_DIR:-.}/scripts/phases/setup-project-claudemd.sh" "$PROJ_DIR" --mode lean
+```
+
+The block holds the rules that apply across every scholar-* skill: no destructive regex on manuscripts, the Objectivity Mandate, the data-safety stack + LOCAL_MODE scope, citation rules, and cross-skill workflow rules. This fork ships **one** profile (lean) — it is the complete, terminal cross-skill contract; there is no separate "full" profile to upgrade to.
+
+The script is **idempotent** (a byte-stable re-run is a no-op) and **non-destructive** (it preserves any content outside the auto-managed marker block, including anything authored by Claude Code's built-in `/init` or a pre-existing `AGENTS.md`). It reads `.claude/safety-status.json` to decide whether to inject the conditional CFPS LOCAL_MODE block.
+
+Surface the script's one-line output to the user verbatim. Expected messages:
+
+- `created <path> (v2-lean)` — fresh project, no prior memory file (one line per target written: CLAUDE.md, AGENTS.md, or both, depending on the detected host)
+- `appended auto-rules block to <path> (existing content preserved)` — the user already had a memory file (e.g., from `/init`) without scholar markers
+- `migrated <path> from <old> to v2-lean` — a project that carried an older auto-rules marker
+- `already at v2-lean, no-op` — idempotent re-run of `/scholar-init`
 
 ### Step 1.3 — If NEEDS_REVIEW entries exist, go straight into review
 
@@ -386,18 +446,29 @@ scholar-init does NOT produce a manuscript document; it produces an initialized 
 **Written only in MODE 1 (by `scripts/init-project.sh`):**
 
 ```
-<cwd>/
-├── data/raw/                     ← user data copied here after scan
-├── data/processed/               ← empty, for downstream pipelines
-├── scripts/                      ← empty skeleton
+<dest>/<slug>/
+├── README.md                     ← operating manual for the project
+├── .gitignore                    ← excludes data/, output/, logs/, sidecar
+├── data/raw/                     ← user data copied/linked here after scan
+├── data/interim/                 ← empty, scripts write cleaned data here
+├── data/processed/               ← empty, analytic datasets
+├── materials/                    ← codebooks, questionnaires, protocols
 ├── output/                       ← pipeline outputs land here
-├── drafts/                       ← manuscript drafts land here
-└── .env                          ← project-level config (SLUG, OUTPUT_ROOT, …)
+└── logs/init-report.md           ← permanent ingest record
+```
+
+**Also written in MODE 1 (by `scripts/phases/setup-project-claudemd.sh`, Step 1.2.5):**
+
+```
+<dest>/<slug>/
+└── CLAUDE.md (or AGENTS.md)      ← auto-managed cross-skill rules block
+                                     (lean profile; idempotent, non-destructive)
 ```
 
 **At end of run, print a summary to the user:**
 - Path of the `.claude/safety-status.json` file
 - Path of the `logs/init-report.md` file
+- The line printed by Step 1.2.5 (`created`/`appended`/`migrated`/`no-op`) for the memory file
 - For Mode 1: the newly created project root
 - For Mode 2: counts of entries resolved by status (`CLEARED`, `LOCAL_MODE`, `ANONYMIZED`, `OVERRIDE`, `HALTED`) and any still in `NEEDS_REVIEW:*`
 - For Mode 3: list of files newly added with their resolved status

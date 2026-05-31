@@ -3,6 +3,32 @@
 All notable changes to open-scholar-skill are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [5.13.0] - 2026-05-31
+
+Updates `scholar-init` from upstream `open-scholar-skills` (private), adapted for this fork's modular, researcher-in-the-loop philosophy. Two features land: an auto-managed project memory file and a scaffold-first init flow. The upstream bootstrap infrastructure (the P2-R `scholar-skill-bootstrap.sh` stanzas and the full-paper "upgrade" path) was deliberately **not** ported — it depends on orchestrator-only scripts this fork does not ship, and there is no full-paper orchestrator here.
+
+### Added
+
+**Auto-managed project memory file (`/scholar-init` Step 1.2.5)**
+
+- **`scripts/phases/setup-project-claudemd.sh`** — writes/refreshes an auto-managed cross-skill rules block in each project's `CLAUDE.md` (Claude Code) or `AGENTS.md` (Codex, via the [agents.md](https://agents.md) cross-tool standard). The block auto-loads in every future session in the project directory, so standalone skill invocations (`/scholar-eda`, `/scholar-analyze`, `/scholar-write`, `/scholar-respond`, …) inherit the cross-skill rules — exactly the "run each skill individually, stay in the loop" use case this fork is built for. Idempotent (byte-stable re-run = no-op) and non-destructive (preserves content outside the marker block, including anything from Claude Code's built-in `/init`). Reads `.claude/safety-status.json` to conditionally inject a CFPS LOCAL_MODE data-handling block.
+  - Ships **only** the lean profile — the complete, terminal cross-skill contract. There is no "full" profile to upgrade to (this fork has no full-paper orchestrator). The marker namespace is `open-scholar-skill:` (not the upstream `scholar-full-paper:`).
+- **`scripts/templates/claudemd-auto-rules-lean.md`** — the lean block: no-destructive-regex rule, Objectivity Mandate, data-safety/LOCAL_MODE scope, citation rules, cross-skill workflow rules.
+- **`scripts/detect-host-agent.sh`** — detects the host AI tool (Claude Code → `CLAUDE.md`; Codex → `AGENTS.md`; unknown → both). Override for tests: `SCHOLAR_HOST_AGENT_OVERRIDE`.
+- **`.claude/skills/_shared/objectivity-mandate.md`** — the canonical anti-sycophancy / scientific-objectivity rule referenced by the lean block.
+
+**Scaffold-first init (slug-only invocation)**
+
+- `scripts/init-project.sh` gains a **`--scaffold`** flag: `/scholar-init <slug>` with no file paths now stands up the empty standard layout (`data/raw`, `data/interim`, `data/processed`, `materials`, `output`, `logs`, `.claude` with an empty `{}` sidecar, plus `README.md`, `.gitignore`, `logs/init-report.md`) and then prompts the user to point at their data and materials, ingesting them via the `add` flow. Lets researchers create the skeleton first and bring data later. `--scaffold` rejects input files (use the normal path to ingest); a slug-only invocation without `--scaffold` still errors as before.
+
+**Tests**
+
+- `tests/smoke/test-setup-project-claudemd.sh` (11 cases) and 6 new cases in `tests/smoke/test-init-project.sh` covering `--scaffold` and the slug-only path.
+
+### Fixed
+
+- `scripts/init-project.sh` README template and header comments no longer reference the (deliberately absent) `scholar-full-paper` orchestrator, and the plural "Open-scholar-skills" was corrected to "Open Scholar Skill".
+
 ## [5.12.0] - 2026-04-22
 
 Sync with upstream `open-scholar-skills` (private). Adds `scholar-monitor`, a current-awareness literature feed designed for recurring `/loop` scheduling with push delivery to the researcher's phone. Fits the researcher-in-the-loop philosophy of this fork: it surfaces new publications and enriches the knowledge graph without automating downstream writing.
